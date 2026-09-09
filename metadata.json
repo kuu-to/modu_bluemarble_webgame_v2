@@ -1,0 +1,6 @@
+{
+  "name": "모두의 부루마블 멀티플레이어",
+  "description": "Socket.io 기반 실시간 2인 멀티플레이어 부루마블 보드게임 (코드 인증 방 시스템)",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

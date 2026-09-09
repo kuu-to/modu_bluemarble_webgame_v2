@@ -1,0 +1,194 @@
+export type CellType = 'start' | 'city' | 'golden_key' | 'island' | 'space' | 'fund' | 'tax' | 'travel';
+
+export type ColorGroup = 'pink' | 'blue' | 'green' | 'orange' | 'special';
+
+export interface SpaceData {
+  id: number;
+  name: string;
+  type: CellType;
+  colorGroup?: ColorGroup;
+  colorHex?: string;
+  price?: number; // Land base price in 만 (10k KRW)
+  villaPrice?: number;
+  buildingPrice?: number;
+  hotelPrice?: number;
+  landmarkPrice?: number;
+  icon?: string;
+  toll?: number; // Calculated or base toll
+  description?: string;
+  isSpecialLand?: boolean; // E.g., Concorde, Queen Elizabeth, Columbia
+}
+
+export interface CellState {
+  owner: number | null; // player index (0 or 1) or null
+  buildings: {
+    hasVilla: boolean;
+    hasBuilding: boolean;
+    hasHotel: boolean;
+    isLandmark: boolean;
+  };
+  currentToll: number;
+}
+
+export type AirplaneColorId = 'red' | 'blue' | 'white' | 'yellow';
+
+export interface Player {
+  id: number;
+  name: string;
+  avatar: string;
+  airplaneColor: AirplaneColorId;
+  color: string; // Tailwind color or hex
+  glowColor: string;
+  secondaryColor: string;
+  pos: number;
+  prevPos: number;
+  money: number; // in 만 (10,000 KRW)
+  totalAssets: number;
+  isAI: boolean;
+  aiDifficulty?: 'easy' | 'normal' | 'hard';
+  islandTurnsLeft: number; // 0 if free, >0 if stuck
+  hasIslandEscapeCard: number;
+  freePassCards: number; // 상대 땅 1회 무료 통과권 보유 수량
+  spaceTravelQueued: boolean;
+  isBankrupt: boolean;
+  ownedCityCount: number;
+  debt: number; // 빚 누적액 (만 원)
+  hasUsedLoan: boolean; // 현재 대출 빚 보유 여부 (전액 상환 시 다시 false로 초기화되어 재대출 가능)
+}
+
+export type ForceSellTargetBuilding = 'villa' | 'building' | 'hotel' | 'landmark';
+
+export interface PropertySalePlan {
+  spaceId: number;
+  sellLand: boolean; // true if land is sold (surrenders ownership and clears all buildings)
+  soldBuildings: ForceSellTargetBuilding[]; // specific buildings dismantled if sellLand is false
+  refundAmount: number;
+}
+
+export interface GoldenKeyCard {
+  id: number;
+  title: string;
+  subtitle: string;
+  description: string;
+  icon: string;
+  type: 'money_gain' | 'money_loss' | 'move_start' | 'move_island' | 'move_space' | 'escape_card' | 'toll_shield' | 'donation' | 'jackpot' | 'force_sell' | 'force_sell_land' | 'force_sell_building' | 'free_pass_card';
+  amount?: number;
+  targetPos?: number;
+}
+
+export interface GameLogEntry {
+  id: string;
+  playerId: number;
+  text: string;
+  type: 'roll' | 'buy' | 'upgrade' | 'toll' | 'golden_key' | 'event' | 'turn' | 'takeover' | 'bankrupt';
+  timestamp: string;
+  highlightAmount?: number;
+}
+
+export type HumanCountOption = 2 | 3 | 4;
+
+export type GameSpeed = 'slow' | 'normal' | 'fast';
+
+export interface GameSpeedSettings {
+  stepIntervalMs: number; // Token hop interval per tile
+  arrivalPauseMs: number; // Delay between landing on tile and modal/action popping up
+  aiThinkDelayMs: number; // AI wait before rolling
+  aiActionDelayMs: number; // AI decision delay before buying / paying toll
+  modalActionDelayMs: number; // Action display delay (after purchase, toll, tax, pass) before next turn
+  bannerDurationMs: number; // Turn banner display time
+  diceRollTicks: number; // Dice tumbling count
+  diceRollIntervalMs: number; // Dice tumbling tick rate
+}
+
+export const SPEED_CONFIGS: Record<GameSpeed, GameSpeedSettings> = {
+  slow: {
+    stepIntervalMs: 260,
+    arrivalPauseMs: 1200,
+    aiThinkDelayMs: 1800,
+    aiActionDelayMs: 1600,
+    modalActionDelayMs: 3400,
+    bannerDurationMs: 2200,
+    diceRollTicks: 10,
+    diceRollIntervalMs: 75
+  },
+  normal: {
+    stepIntervalMs: 180,
+    arrivalPauseMs: 800,
+    aiThinkDelayMs: 1100,
+    aiActionDelayMs: 1100,
+    modalActionDelayMs: 2400,
+    bannerDurationMs: 1800,
+    diceRollTicks: 7,
+    diceRollIntervalMs: 60
+  },
+  fast: {
+    stepIntervalMs: 120,
+    arrivalPauseMs: 500,
+    aiThinkDelayMs: 600,
+    aiActionDelayMs: 600,
+    modalActionDelayMs: 1300,
+    bannerDurationMs: 1100,
+    diceRollTicks: 5,
+    diceRollIntervalMs: 45
+  }
+};
+
+export type TimeLimitOption = 30 | 60 | 90 | 0; // 0 = unlimited / normal
+
+export interface GameModeConfig {
+  humanCount: HumanCountOption; // 2인, 3인, 4인 (인간 플레이어 수)
+  aiCount: number; // 2인의 경우 0~2명, 3인의 경우 0~1명, 4인의 경우 0명
+  speed?: GameSpeed; // 게임 진행 속도 ('slow' | 'normal' | 'fast')
+  timeLimitMinutes?: TimeLimitOption; // 제한 시간 (30분, 60분, 90분)
+}
+
+export type BroadcastCategory = 
+  | 'start'
+  | 'turn'
+  | 'roll' 
+  | 'arrive' 
+  | 'purchase' 
+  | 'pass' 
+  | 'toll_due' 
+  | 'toll_paid' 
+  | 'takeover' 
+  | 'golden_key' 
+  | 'space_travel' 
+  | 'island' 
+  | 'salary' 
+  | 'tax' 
+  | 'fund' 
+  | 'bankrupt';
+
+export interface BoardBroadcastMessage {
+  id: string;
+  category: BroadcastCategory;
+  playerId: number;
+  playerName: string;
+  playerColor: string;
+  isAI: boolean;
+  title: string;
+  detail: string;
+  badge?: string;
+  badgeColor?: 'emerald' | 'amber' | 'rose' | 'sky' | 'indigo' | 'purple' | 'slate';
+  icon?: string;
+  timestamp?: number;
+}
+
+export type GameStatus = 'idle' | 'rolling' | 'moving' | 'action_modal' | 'game_over';
+
+export interface GameOverResult {
+  winner: Player;
+  rankings: Player[];
+  reason: string;
+}
+
+export interface FloatingEffect {
+  id: string;
+  playerId: number;
+  amount: number;
+  isPositive: boolean;
+  text: string;
+  x: number;
+  y: number;
+}
