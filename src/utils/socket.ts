@@ -33,14 +33,20 @@ let socketInstance: Socket | null = null;
 export function getSocket(code?: string): Socket {
   if (!socketInstance) {
     const authCode = code || getSavedAccessCode() || '964';
-    socketInstance = io({
-      auth: {
-        code: authCode,
-      },
-      reconnectionAttempts: 10,
-      reconnectionDelay: 1000,
-      transports: ['websocket', 'polling'],
-    });
+    const serverUrl = (import.meta as any).env?.VITE_SERVER_URL || undefined;
+    socketInstance = serverUrl 
+      ? io(serverUrl, {
+          auth: { code: authCode },
+          reconnectionAttempts: 10,
+          reconnectionDelay: 1000,
+          transports: ['websocket', 'polling'],
+        })
+      : io({
+          auth: { code: authCode },
+          reconnectionAttempts: 10,
+          reconnectionDelay: 1000,
+          transports: ['websocket', 'polling'],
+        });
   }
   return socketInstance;
 }
