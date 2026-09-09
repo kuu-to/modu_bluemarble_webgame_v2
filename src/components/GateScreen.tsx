@@ -146,9 +146,7 @@ export const GateScreen: React.FC<GateScreenProps> = ({ onAuthenticated }) => {
         </div>
 
         <p className="text-slate-400 text-xs sm:text-sm text-center mt-3 leading-relaxed">
-          친구와 둘만의 대전을 위해 보안 인증 코드를 입력하세요.
-          <br />
-          <span className="text-slate-500 text-[11px]">(올바른 코드를 입력해야 접속할 수 있습니다)</span>
+          인증 코드를 입력하세요
         </p>
 
         {/* 3-Digit PIN Input Boxes */}
