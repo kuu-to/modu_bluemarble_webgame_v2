@@ -4,7 +4,7 @@ import path from 'path';
 import { Server as SocketIOServer, Socket } from 'socket.io';
 import { createServer as createViteServer } from 'vite';
 
-const PORT = 3000;
+const PORT = Number(process.env.PORT) || 3000;
 const ACCESS_CODE = '964';
 
 export interface RoomPlayer {
