@@ -18,6 +18,7 @@ import { AirplanePiece } from './AirplanePiece';
 import { soundManager } from '../utils/audio';
 
 export interface WaitingRoomPlayer {
+  token?: string;
   socketId: string;
   name: string;
   color: string;

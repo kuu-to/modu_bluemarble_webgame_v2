@@ -8,6 +8,7 @@ const PORT = Number(process.env.PORT) || 3000;
 const ACCESS_CODE = '964';
 
 export interface RoomPlayer {
+  token: string;
   socketId: string;
   name: string;
   color: string;
@@ -20,6 +21,7 @@ export interface RoomPlayer {
 export interface RoomData {
   id: string;
   createdAt: number;
+  lastActivity: number;
   status: 'waiting' | 'in_game' | 'game_over';
   players: RoomPlayer[];
   config: {
@@ -35,6 +37,10 @@ export interface RoomData {
     text: string;
     timestamp: number;
   }>;
+}
+
+function generatePlayerToken(): string {
+  return `ptok_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
 }
 
 async function startServer() {
@@ -116,6 +122,7 @@ async function startServer() {
       customRoomId?: string;
       playerName: string;
       playerColor: string;
+      playerToken?: string;
       config?: {
         speed: 'normal' | 'fast' | 'turbo';
         timeLimitMinutes: number;
@@ -138,7 +145,10 @@ async function startServer() {
         return;
       }
 
+      const hostToken = payload.playerToken || generatePlayerToken();
+
       const hostPlayer: RoomPlayer = {
+        token: hostToken,
         socketId: socket.id,
         name: payload.playerName?.trim() || '방장 플레이어',
         color: payload.playerColor || 'red',
@@ -151,6 +161,7 @@ async function startServer() {
       const newRoom: RoomData = {
         id: roomId,
         createdAt: Date.now(),
+        lastActivity: Date.now(),
         status: 'waiting',
         players: [hostPlayer],
         config: {
@@ -174,18 +185,19 @@ async function startServer() {
       socket.join(roomId);
 
       if (typeof callback === 'function') {
-        callback({ success: true, roomId, room: newRoom, myPlayerIndex: 0 });
+        callback({ success: true, roomId, room: newRoom, myPlayerIndex: 0, playerToken: hostToken });
       }
 
       io.to(roomId).emit('room_updated', newRoom);
     });
 
-    // Join Room
+    // Join Room (Supports both fresh join and game reconnection)
     socket.on('join_room', (payload: {
       accessCode: string;
       roomId: string;
       playerName: string;
       playerColor: string;
+      playerToken?: string;
     }, callback) => {
       if (String(payload?.accessCode).trim() !== ACCESS_CODE) {
         if (typeof callback === 'function') {
@@ -204,12 +216,34 @@ async function startServer() {
         return;
       }
 
+      room.lastActivity = Date.now();
+
       if (room.status === 'in_game') {
-        // Check if this is a reconnecting player
-        const existingIdx = room.players.findIndex(p => p.name === payload.playerName?.trim());
+        // Reconnection match logic:
+        // 1. By playerToken
+        let existingIdx = -1;
+        if (payload.playerToken) {
+          existingIdx = room.players.findIndex(p => p.token === payload.playerToken);
+        }
+        // 2. By playerName match
+        if (existingIdx === -1 && payload.playerName?.trim()) {
+          existingIdx = room.players.findIndex(p => p.name.trim().toLowerCase() === payload.playerName.trim().toLowerCase());
+        }
+        // 3. Fallback: If any player is currently disconnected, allow claiming their slot
+        if (existingIdx === -1) {
+          const disconnectedIdx = room.players.findIndex(p => !p.connected);
+          if (disconnectedIdx !== -1) {
+            existingIdx = disconnectedIdx;
+          }
+        }
+
         if (existingIdx !== -1) {
-          room.players[existingIdx].socketId = socket.id;
-          room.players[existingIdx].connected = true;
+          const targetPlayer = room.players[existingIdx];
+          targetPlayer.socketId = socket.id;
+          targetPlayer.connected = true;
+          if (payload.playerToken) {
+            targetPlayer.token = payload.playerToken;
+          }
           currentRoomId = targetRoomId;
           socket.join(targetRoomId);
 
@@ -220,10 +254,20 @@ async function startServer() {
               room,
               myPlayerIndex: existingIdx,
               isReconnecting: true,
+              playerToken: targetPlayer.token,
+              gameState: room.gameState,
             });
           }
+
           io.to(targetRoomId).emit('room_updated', room);
-          io.to(targetRoomId).emit('player_reconnected', { playerIndex: existingIdx });
+          io.to(targetRoomId).emit('player_reconnected', { playerIndex: existingIdx, playerName: targetPlayer.name });
+
+          // Notify opponent to provide freshest state snapshot
+          socket.to(targetRoomId).emit('request_state_sync');
+
+          if (room.gameState) {
+            socket.emit('game_state_synced', room.gameState);
+          }
           return;
         }
 
@@ -233,7 +277,59 @@ async function startServer() {
         return;
       }
 
+      // If room is in waiting status: check if already in room
+      let existingWaitingIdx = -1;
+      if (payload.playerToken) {
+        existingWaitingIdx = room.players.findIndex(p => p.token === payload.playerToken);
+      }
+      if (existingWaitingIdx === -1 && payload.playerName?.trim()) {
+        existingWaitingIdx = room.players.findIndex(p => p.name.trim().toLowerCase() === payload.playerName.trim().toLowerCase());
+      }
+
+      if (existingWaitingIdx !== -1) {
+        const targetPlayer = room.players[existingWaitingIdx];
+        targetPlayer.socketId = socket.id;
+        targetPlayer.connected = true;
+        currentRoomId = targetRoomId;
+        socket.join(targetRoomId);
+
+        if (typeof callback === 'function') {
+          callback({
+            success: true,
+            roomId: targetRoomId,
+            room,
+            myPlayerIndex: existingWaitingIdx,
+            playerToken: targetPlayer.token,
+          });
+        }
+        io.to(targetRoomId).emit('room_updated', room);
+        return;
+      }
+
       if (room.players.length >= 2) {
+        // If a player disconnected in waiting room, allow takeover
+        const disconnectedIdx = room.players.findIndex(p => !p.connected);
+        if (disconnectedIdx !== -1) {
+          const targetPlayer = room.players[disconnectedIdx];
+          targetPlayer.socketId = socket.id;
+          targetPlayer.connected = true;
+          targetPlayer.name = payload.playerName?.trim() || targetPlayer.name;
+          currentRoomId = targetRoomId;
+          socket.join(targetRoomId);
+
+          if (typeof callback === 'function') {
+            callback({
+              success: true,
+              roomId: targetRoomId,
+              room,
+              myPlayerIndex: disconnectedIdx,
+              playerToken: targetPlayer.token,
+            });
+          }
+          io.to(targetRoomId).emit('room_updated', room);
+          return;
+        }
+
         if (typeof callback === 'function') {
           callback({ success: false, error: '해당 방은 2인 정원이 가득 찼습니다.' });
         }
@@ -246,7 +342,10 @@ async function startServer() {
         chosenColor = chosenColor === 'red' ? 'blue' : 'emerald';
       }
 
+      const guestToken = payload.playerToken || generatePlayerToken();
+
       const guestPlayer: RoomPlayer = {
+        token: guestToken,
         socketId: socket.id,
         name: payload.playerName?.trim() || '친구 플레이어',
         color: chosenColor,
@@ -269,10 +368,92 @@ async function startServer() {
       });
 
       if (typeof callback === 'function') {
-        callback({ success: true, roomId: targetRoomId, room, myPlayerIndex: 1 });
+        callback({ success: true, roomId: targetRoomId, room, myPlayerIndex: 1, playerToken: guestToken });
       }
 
       io.to(targetRoomId).emit('room_updated', room);
+    });
+
+    // Dedicated Reconnect Room Event
+    socket.on('reconnect_room', (payload: {
+      roomId: string;
+      playerToken?: string;
+      playerIndex?: number;
+      playerName?: string;
+    }, callback) => {
+      const targetRoomId = (payload?.roomId || '').trim().toUpperCase();
+      const room = rooms.get(targetRoomId);
+
+      if (!room) {
+        if (typeof callback === 'function') {
+          callback({ success: false, error: '방을 찾을 수 없거나 이미 종료되었습니다.' });
+        }
+        return;
+      }
+
+      room.lastActivity = Date.now();
+
+      // Find player by token, index, or name
+      let matchedIdx = -1;
+      if (payload.playerToken) {
+        matchedIdx = room.players.findIndex(p => p.token === payload.playerToken);
+      }
+      if (matchedIdx === -1 && typeof payload.playerIndex === 'number' && room.players[payload.playerIndex]) {
+        matchedIdx = payload.playerIndex;
+      }
+      if (matchedIdx === -1 && payload.playerName?.trim()) {
+        matchedIdx = room.players.findIndex(p => p.name.trim().toLowerCase() === payload.playerName?.trim().toLowerCase());
+      }
+      if (matchedIdx === -1) {
+        // Fallback: any disconnected player
+        matchedIdx = room.players.findIndex(p => !p.connected);
+      }
+
+      if (matchedIdx === -1) {
+        if (typeof callback === 'function') {
+          callback({ success: false, error: '재접속할 플레이어 정보를 확인할 수 없습니다.' });
+        }
+        return;
+      }
+
+      const p = room.players[matchedIdx];
+      p.socketId = socket.id;
+      p.connected = true;
+      if (payload.playerToken) {
+        p.token = payload.playerToken;
+      }
+      currentRoomId = targetRoomId;
+      socket.join(targetRoomId);
+
+      if (typeof callback === 'function') {
+        callback({
+          success: true,
+          roomId: targetRoomId,
+          room,
+          myPlayerIndex: matchedIdx,
+          playerToken: p.token,
+          gameState: room.gameState,
+          status: room.status,
+        });
+      }
+
+      io.to(targetRoomId).emit('room_updated', room);
+      io.to(targetRoomId).emit('player_reconnected', { playerIndex: matchedIdx, playerName: p.name });
+
+      if (room.status === 'in_game') {
+        // Trigger other player to send latest snapshot
+        socket.to(targetRoomId).emit('request_state_sync');
+        if (room.gameState) {
+          socket.emit('game_state_synced', room.gameState);
+        }
+      }
+    });
+
+    // Request State Sync Relay
+    socket.on('request_state_sync', (payload: { roomId?: string }) => {
+      const rId = (payload?.roomId || currentRoomId)?.toUpperCase();
+      if (!rId) return;
+      socket.to(rId).emit('request_state_sync');
     });
 
     // Toggle Ready State (Guest)
@@ -396,6 +577,14 @@ async function startServer() {
     socket.on('add_game_log', (payload: { roomId: string; entry: any }) => {
       if (!payload.roomId || !payload.entry) return;
       const roomId = payload.roomId.toUpperCase();
+      const room = rooms.get(roomId);
+      if (room) {
+        room.lastActivity = Date.now();
+        if (!room.gameState) room.gameState = {};
+        if (!Array.isArray(room.gameState.gameLogs)) room.gameState.gameLogs = [];
+        room.gameState.gameLogs.push(payload.entry);
+        if (room.gameState.gameLogs.length > 100) room.gameState.gameLogs.shift();
+      }
       socket.to(roomId).emit('add_game_log', payload);
     });
 
@@ -493,6 +682,17 @@ async function startServer() {
       clientSocket.leave(roomId);
     }
   });
+
+  // Periodic cleanup for stale rooms (inactive for more than 3 hours with no connected players)
+  setInterval(() => {
+    const now = Date.now();
+    for (const [roomId, room] of rooms.entries()) {
+      const anyConnected = room.players.some(p => p.connected);
+      if (!anyConnected && (now - room.lastActivity > 3 * 60 * 60 * 1000)) {
+        rooms.delete(roomId);
+      }
+    }
+  }, 10 * 60 * 1000);
 
   // Vite middleware in development vs static serving in production
   if (process.env.NODE_ENV !== 'production') {

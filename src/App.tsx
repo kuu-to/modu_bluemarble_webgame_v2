@@ -37,7 +37,18 @@ import { GateScreen } from './components/GateScreen';
 import { MultiplayerLobby } from './components/MultiplayerLobby';
 import { WaitingRoom, WaitingRoomData } from './components/WaitingRoom';
 import { InGameMultiplayerHUD, FloatingReaction } from './components/InGameMultiplayerHUD';
-import { getSocket, getSavedAccessCode, saveAccessCode, clearAccessCode } from './utils/socket';
+import { 
+  getSocket, 
+  getSavedAccessCode, 
+  saveAccessCode, 
+  clearAccessCode,
+  getSavedGameSession,
+  saveGameSession,
+  clearGameSession,
+  getSavedUserProfile,
+  saveSavedUserProfile,
+  SavedGameSession
+} from './utils/socket';
 import { Trophy } from 'lucide-react';
 
 const INITIAL_MONEY = 300;
@@ -63,10 +74,21 @@ export default function App() {
   const [myPlayerIndex, setMyPlayerIndex] = useState<number>(0);
   const [lobbyError, setLobbyError] = useState<string | null>(null);
   const [isLobbyLoading, setIsLobbyLoading] = useState<boolean>(false);
-  const [myProfile, setMyProfile] = useState<{ name: string; color: AirplaneColorId }>({
-    name: '플레이어 1',
-    color: 'red',
+  const [myProfile, setMyProfile] = useState<{ name: string; color: AirplaneColorId }>(() => {
+    const saved = getSavedUserProfile();
+    if (saved && saved.name) {
+      return {
+        name: saved.name,
+        color: (saved.color as AirplaneColorId) || 'red',
+      };
+    }
+    return {
+      name: '플레이어 1',
+      color: 'red',
+    };
   });
+  const [savedSession, setSavedSession] = useState<SavedGameSession | null>(() => getSavedGameSession());
+  const playerTokenRef = useRef<string | null>(savedSession?.playerToken || null);
 
   // In-game multiplayer extras
   const [opponentConnected, setOpponentConnected] = useState<boolean>(true);
@@ -189,6 +211,72 @@ export default function App() {
       }, 5000);
     }
   }, []);
+
+  // Restore game state from remote sync or reconnect snapshot
+  const restoreGameState = useCallback((incomingState: any) => {
+    if (!incomingState) return;
+
+    if (incomingState.cells) {
+      setCells(incomingState.cells);
+      cellsRef.current = incomingState.cells;
+    }
+    if (incomingState.players) {
+      setPlayers(incomingState.players);
+      playersRef.current = incomingState.players;
+    }
+    if (incomingState.activePlayerIndex !== undefined) {
+      setActivePlayerIndex(incomingState.activePlayerIndex);
+      activePlayerIndexRef.current = incomingState.activePlayerIndex;
+    }
+    if (incomingState.turnCount !== undefined) {
+      setTurnCount(incomingState.turnCount);
+    }
+    if (incomingState.socialFund !== undefined) {
+      setSocialFund(incomingState.socialFund);
+    }
+    if (incomingState.remainingSeconds !== undefined) {
+      setRemainingSeconds(incomingState.remainingSeconds);
+    }
+    if (incomingState.currentDice) {
+      setCurrentDice(incomingState.currentDice);
+    }
+    if (incomingState.lastDice) {
+      setLastDice(incomingState.lastDice);
+    }
+    if (incomingState.isDouble !== undefined) {
+      setIsDouble(incomingState.isDouble);
+    }
+    if (incomingState.doubleCount !== undefined) {
+      setDoubleCount(incomingState.doubleCount);
+      doubleCountRef.current = incomingState.doubleCount;
+    }
+    if (incomingState.gameLogs && Array.isArray(incomingState.gameLogs)) {
+      setGameLogs(incomingState.gameLogs);
+    }
+    if (incomingState.gameOverData) {
+      setGameOverData(incomingState.gameOverData);
+      gameOverDataRef.current = incomingState.gameOverData;
+      setShowGameOverModal(true);
+      setActiveModal('game_over');
+    }
+
+    if (incomingState.activeObserverModal) {
+      setActiveObserverModal(incomingState.activeObserverModal);
+      setActiveObserverDetail(incomingState.activeObserverDetail || '');
+    } else {
+      setActiveObserverModal(null);
+      setActiveObserverDetail('');
+    }
+
+    if (incomingState.lastDecisionNotice !== undefined) {
+      setDecisionNotice(incomingState.lastDecisionNotice);
+    }
+
+    if (incomingState.boardBroadcast !== undefined && incomingState.boardBroadcast !== null) {
+      setBoardBroadcast(incomingState.boardBroadcast);
+      boardBroadcastRef.current = incomingState.boardBroadcast;
+    }
+  }, [setDecisionNotice]);
 
   // Timers
   const registerTimer = useCallback((fn: () => void, delayMs: number, expectedTurnSeq?: number) => {
@@ -379,6 +467,7 @@ export default function App() {
       boardBroadcast: boardBroadcastRef.current,
       remainingSeconds,
       gameOverData: gameOverDataRef.current,
+      gameLogs,
       ...overrides,
     };
     socket.emit('sync_game_state', {
@@ -396,6 +485,49 @@ export default function App() {
     function onConnect() {
       setSocketConnected(true);
       setLobbyError(null);
+
+      // Re-attach socket to active room if reconnecting or active game exists
+      const session = getSavedGameSession();
+      const currentActiveRoom = currentRoomRef.current;
+      const rId = currentActiveRoom?.id || session?.roomId;
+      const tok = playerTokenRef.current || session?.playerToken;
+      const pIdx = myPlayerIndexRef.current ?? session?.playerIndex;
+      const pName = myProfile.name || session?.playerName;
+
+      if (rId && (isMultiplayerRef.current || (session && session.status === 'in_game'))) {
+        socket.emit('reconnect_room', {
+          roomId: rId,
+          playerToken: tok,
+          playerIndex: pIdx,
+          playerName: pName,
+        }, (res: any) => {
+          if (res?.success) {
+            setCurrentRoom(res.room);
+            setMyPlayerIndex(res.myPlayerIndex);
+            if (res.playerToken) {
+              playerTokenRef.current = res.playerToken;
+            }
+            setIsMultiplayer(true);
+            setOpponentConnected(true);
+
+            if (res.status === 'in_game' || res.room?.status === 'in_game') {
+              if (res.gameState) {
+                restoreGameState(res.gameState);
+              }
+              setAppScreen('playing');
+              saveGameSession({
+                roomId: res.roomId,
+                playerToken: res.playerToken || tok || '',
+                playerIndex: res.myPlayerIndex,
+                playerName: pName,
+                playerColor: myProfile.color,
+                status: 'in_game',
+              });
+              setSavedSession(getSavedGameSession());
+            }
+          }
+        });
+      }
     }
 
     function onDisconnect() {
@@ -416,10 +548,18 @@ export default function App() {
       }
     }
 
-    function onPlayerReconnected(data: { playerIndex: number }) {
+    function onPlayerReconnected(data: { playerIndex: number; playerName?: string }) {
       if (isMultiplayerRef.current) {
         setOpponentConnected(true);
-        addLog(data.playerIndex, `🟢 상대방이 게임에 다시 연결되었습니다!`, 'event');
+        addLog(data.playerIndex, `🟢 [${data.playerName || '상대방'}] 님이 게임에 다시 연결되었습니다!`, 'event');
+        // Immediate sync to give reconnected player fresh state
+        broadcastSyncState();
+      }
+    }
+
+    function onRequestStateSync() {
+      if (isMultiplayerRef.current) {
+        broadcastSyncState();
       }
     }
 
@@ -427,6 +567,16 @@ export default function App() {
       setCurrentRoom(data.room);
       setIsMultiplayer(true);
       setOpponentConnected(true);
+
+      saveGameSession({
+        roomId: data.room.id,
+        playerToken: playerTokenRef.current || '',
+        playerIndex: myPlayerIndexRef.current,
+        playerName: myProfile.name,
+        playerColor: myProfile.color,
+        status: 'in_game',
+      });
+      setSavedSession(getSavedGameSession());
 
       // Initialize from room config
       const p1 = data.room.players[0];
@@ -539,57 +689,11 @@ export default function App() {
       doubleCount: number;
       playerIndex: number;
     }) {
-      // Execute the exact dice roll animation remotely for spectator parity
       executeRemoteRollAnimation(payload.dice, payload.isDouble, payload.doubleCount, payload.playerIndex);
     }
 
     function onGameStateSynced(incomingState: any) {
-      if (!incomingState) return;
-
-      if (incomingState.cells) {
-        setCells(incomingState.cells);
-        cellsRef.current = incomingState.cells;
-      }
-      if (incomingState.players) {
-        setPlayers(incomingState.players);
-        playersRef.current = incomingState.players;
-      }
-      if (incomingState.activePlayerIndex !== undefined) {
-        setActivePlayerIndex(incomingState.activePlayerIndex);
-        activePlayerIndexRef.current = incomingState.activePlayerIndex;
-      }
-      if (incomingState.turnCount !== undefined) {
-        setTurnCount(incomingState.turnCount);
-      }
-      if (incomingState.socialFund !== undefined) {
-        setSocialFund(incomingState.socialFund);
-      }
-      if (incomingState.remainingSeconds !== undefined) {
-        setRemainingSeconds(incomingState.remainingSeconds);
-      }
-      if (incomingState.gameOverData) {
-        setGameOverData(incomingState.gameOverData);
-        gameOverDataRef.current = incomingState.gameOverData;
-        setShowGameOverModal(true);
-      }
-
-      // Observer Modal & Decision notice
-      if (incomingState.activeObserverModal) {
-        setActiveObserverModal(incomingState.activeObserverModal);
-        setActiveObserverDetail(incomingState.activeObserverDetail || '');
-      } else {
-        setActiveObserverModal(null);
-        setActiveObserverDetail('');
-      }
-
-      if (incomingState.lastDecisionNotice !== undefined) {
-        setDecisionNotice(incomingState.lastDecisionNotice);
-      }
-
-      if (incomingState.boardBroadcast !== undefined && incomingState.boardBroadcast !== null) {
-        setBoardBroadcast(incomingState.boardBroadcast);
-        boardBroadcastRef.current = incomingState.boardBroadcast;
-      }
+      restoreGameState(incomingState);
     }
 
     function onChatMessage(msg: any) {
@@ -636,6 +740,7 @@ export default function App() {
     socket.on('room_updated', onRoomUpdated);
     socket.on('player_disconnected', onPlayerDisconnected);
     socket.on('player_reconnected', onPlayerReconnected);
+    socket.on('request_state_sync', onRequestStateSync);
     socket.on('game_started', onGameStarted);
     socket.on('dice_rolled', onRemoteDiceRolled);
     socket.on('game_state_synced', onGameStateSynced);
@@ -646,7 +751,7 @@ export default function App() {
     socket.on('add_game_log', onAddGameLog);
 
     if (socket.connected) {
-      setSocketConnected(true);
+      onConnect();
     }
 
     return () => {
@@ -655,6 +760,7 @@ export default function App() {
       socket.off('room_updated', onRoomUpdated);
       socket.off('player_disconnected', onPlayerDisconnected);
       socket.off('player_reconnected', onPlayerReconnected);
+      socket.off('request_state_sync', onRequestStateSync);
       socket.off('game_started', onGameStarted);
       socket.off('dice_rolled', onRemoteDiceRolled);
       socket.off('game_state_synced', onGameStateSynced);
@@ -664,14 +770,22 @@ export default function App() {
       socket.off('board_broadcast_clear', onBoardBroadcastClear);
       socket.off('add_game_log', onAddGameLog);
     };
-  }, [appScreen, registerTimer]);
+  }, [appScreen, registerTimer, restoreGameState]);
 
-  // Check URL query param for room code on mount
+  // Check URL query param for room code on mount or auto-reconnect recent in-game session
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const roomParam = params.get('room');
     if (roomParam && appScreen === 'lobby' && socketConnected) {
       handleJoinRoom(roomParam);
+      return;
+    }
+
+    if (appScreen === 'lobby' && socketConnected && savedSession && savedSession.status === 'in_game') {
+      const elapsed = Date.now() - (savedSession.timestamp || 0);
+      if (elapsed < 25 * 1000) {
+        handleReconnectSession(savedSession);
+      }
     }
   }, [appScreen, socketConnected]);
 
@@ -2031,6 +2145,8 @@ export default function App() {
       setCurrentRoom(null);
       setIsMultiplayer(false);
     }
+    clearGameSession();
+    setSavedSession(null);
     setAppScreen('lobby');
   };
 
@@ -2100,14 +2216,27 @@ export default function App() {
       customRoomId: customCode,
       playerName: myProfile.name,
       playerColor: myProfile.color,
+      playerToken: playerTokenRef.current || undefined,
       config,
     }, (res: any) => {
       setIsLobbyLoading(false);
       if (res?.success) {
         setCurrentRoom(res.room);
         setMyPlayerIndex(0);
+        if (res.playerToken) {
+          playerTokenRef.current = res.playerToken;
+        }
         setIsMultiplayer(true);
         setAppScreen('waiting');
+        saveGameSession({
+          roomId: res.roomId,
+          playerToken: res.playerToken || '',
+          playerIndex: 0,
+          playerName: myProfile.name,
+          playerColor: myProfile.color,
+          status: 'waiting',
+        });
+        setSavedSession(getSavedGameSession());
       } else {
         setLobbyError(res?.error || '방 생성에 실패했습니다.');
       }
@@ -2124,17 +2253,131 @@ export default function App() {
       roomId,
       playerName: myProfile.name,
       playerColor: myProfile.color,
+      playerToken: playerTokenRef.current || savedSession?.playerToken || undefined,
     }, (res: any) => {
       setIsLobbyLoading(false);
       if (res?.success) {
         setCurrentRoom(res.room);
         setMyPlayerIndex(res.myPlayerIndex);
+        if (res.playerToken) {
+          playerTokenRef.current = res.playerToken;
+        }
         setIsMultiplayer(true);
-        setAppScreen('waiting');
+
+        if (res.isReconnecting || res.room?.status === 'in_game') {
+          if (res.gameState) {
+            restoreGameState(res.gameState);
+          }
+          setAppScreen('playing');
+          saveGameSession({
+            roomId: res.roomId,
+            playerToken: res.playerToken || playerTokenRef.current || '',
+            playerIndex: res.myPlayerIndex,
+            playerName: myProfile.name,
+            playerColor: myProfile.color,
+            status: 'in_game',
+          });
+          setSavedSession(getSavedGameSession());
+          addLog(res.myPlayerIndex, `🟢 게임에 성공적으로 재접속되었습니다!`, 'event');
+          triggerBroadcast({
+            category: 'turn',
+            playerId: res.myPlayerIndex,
+            playerName: myProfile.name,
+            playerColor: myProfile.color,
+            isAI: false,
+            title: `🟢 [${myProfile.name}] 재접속 완료`,
+            detail: '게임에 다시 연결되었습니다. 실시간 플레이를 이어갑니다.',
+            badge: '재접속 완료',
+            badgeColor: 'emerald',
+          });
+        } else {
+          setAppScreen('waiting');
+          saveGameSession({
+            roomId: res.roomId,
+            playerToken: res.playerToken || '',
+            playerIndex: res.myPlayerIndex,
+            playerName: myProfile.name,
+            playerColor: myProfile.color,
+            status: 'waiting',
+          });
+          setSavedSession(getSavedGameSession());
+        }
       } else {
         setLobbyError(res?.error || '방 입장에 실패했습니다. 코드를 확인해주세요.');
       }
     });
+  };
+
+  const handleReconnectSession = (sessionToReconnect: SavedGameSession) => {
+    setIsLobbyLoading(true);
+    setLobbyError(null);
+    const socket = getSocket('964');
+
+    socket.emit('reconnect_room', {
+      roomId: sessionToReconnect.roomId,
+      playerToken: sessionToReconnect.playerToken,
+      playerIndex: sessionToReconnect.playerIndex,
+      playerName: sessionToReconnect.playerName || myProfile.name,
+    }, (res: any) => {
+      setIsLobbyLoading(false);
+      if (res?.success) {
+        setCurrentRoom(res.room);
+        setMyPlayerIndex(res.myPlayerIndex);
+        if (res.playerToken) {
+          playerTokenRef.current = res.playerToken;
+        }
+        setIsMultiplayer(true);
+        setOpponentConnected(true);
+
+        if (res.status === 'in_game' || res.room?.status === 'in_game') {
+          if (res.gameState) {
+            restoreGameState(res.gameState);
+          }
+          setAppScreen('playing');
+          saveGameSession({
+            roomId: res.roomId,
+            playerToken: res.playerToken || sessionToReconnect.playerToken,
+            playerIndex: res.myPlayerIndex,
+            playerName: sessionToReconnect.playerName || myProfile.name,
+            playerColor: sessionToReconnect.playerColor || myProfile.color,
+            status: 'in_game',
+          });
+          setSavedSession(getSavedGameSession());
+          addLog(res.myPlayerIndex, `🟢 게임에 성공적으로 재접속되었습니다!`, 'event');
+          triggerBroadcast({
+            category: 'turn',
+            playerId: res.myPlayerIndex,
+            playerName: myProfile.name,
+            playerColor: myProfile.color,
+            isAI: false,
+            title: `🟢 [${myProfile.name}] 재접속 완료`,
+            detail: '게임에 다시 연결되었습니다. 실시간 플레이를 이어갑니다.',
+            badge: '재접속 완료',
+            badgeColor: 'emerald',
+          });
+        } else {
+          setAppScreen('waiting');
+          saveGameSession({
+            roomId: res.roomId,
+            playerToken: res.playerToken || sessionToReconnect.playerToken,
+            playerIndex: res.myPlayerIndex,
+            playerName: sessionToReconnect.playerName || myProfile.name,
+            playerColor: sessionToReconnect.playerColor || myProfile.color,
+            status: 'waiting',
+          });
+          setSavedSession(getSavedGameSession());
+        }
+      } else {
+        setLobbyError(res?.error || '재접속에 실패했습니다. 방이 종료되었거나 유효하지 않습니다.');
+        clearGameSession();
+        setSavedSession(null);
+      }
+    });
+  };
+
+  const handleClearSavedSession = () => {
+    clearGameSession();
+    setSavedSession(null);
   };
 
   // Waiting Room Handlers
@@ -2158,6 +2401,8 @@ export default function App() {
       const socket = getSocket();
       socket.emit('leave_room', { roomId: currentRoom.id });
     }
+    clearGameSession();
+    setSavedSession(null);
     setCurrentRoom(null);
     setIsMultiplayer(false);
     setAppScreen('lobby');
@@ -2186,6 +2431,7 @@ export default function App() {
 
   const handleUpdateProfile = (name: string, color: AirplaneColorId) => {
     setMyProfile({ name, color });
+    saveSavedUserProfile({ name, color });
     if (currentRoom) {
       const socket = getSocket();
       socket.emit('update_profile', { roomId: currentRoom.id, name, color });
@@ -2215,6 +2461,9 @@ export default function App() {
         socketConnected={socketConnected}
         playerName={myProfile.name}
         playerColor={myProfile.color}
+        savedSession={savedSession}
+        onReconnectSession={handleReconnectSession}
+        onClearSavedSession={handleClearSavedSession}
         onUpdateProfile={handleUpdateProfile}
         onCreateRoom={handleCreateRoom}
         onJoinRoom={handleJoinRoom}

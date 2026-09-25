@@ -11,16 +11,22 @@ import {
   ArrowRight, 
   LogOut,
   Sparkles,
-  Gamepad2
+  Gamepad2,
+  RefreshCw,
+  X
 } from 'lucide-react';
 import { AirplaneColorId, AIRPLANE_CONFIGS } from '../utils/airplaneConfig';
 import { AirplanePiece } from './AirplanePiece';
 import { soundManager } from '../utils/audio';
+import { SavedGameSession } from '../utils/socket';
 
 interface MultiplayerLobbyProps {
   socketConnected: boolean;
   playerName: string;
   playerColor: AirplaneColorId;
+  savedSession?: SavedGameSession | null;
+  onReconnectSession?: (session: SavedGameSession) => void;
+  onClearSavedSession?: () => void;
   onUpdateProfile: (name: string, color: AirplaneColorId) => void;
   onCreateRoom: (customCode?: string, config?: { speed: 'normal' | 'fast' | 'turbo'; timeLimitMinutes: number; initialMoney: number }) => void;
   onJoinRoom: (roomId: string) => void;
@@ -34,6 +40,9 @@ export const MultiplayerLobby: React.FC<MultiplayerLobbyProps> = ({
   socketConnected,
   playerName,
   playerColor,
+  savedSession,
+  onReconnectSession,
+  onClearSavedSession,
   onUpdateProfile,
   onCreateRoom,
   onJoinRoom,
@@ -43,7 +52,7 @@ export const MultiplayerLobby: React.FC<MultiplayerLobbyProps> = ({
   errorMessage
 }) => {
   const [activeTab, setActiveTab] = useState<'create' | 'join'>('create');
-  const [inputRoomCode, setInputRoomCode] = useState<string>('');
+  const [inputRoomCode, setInputRoomCode] = useState<string>(savedSession?.roomId || '');
   const [customRoomCode, setCustomRoomCode] = useState<string>('');
   const [gameSpeed, setGameSpeed] = useState<'normal' | 'fast' | 'turbo'>('normal');
   const [timeLimit, setTimeLimit] = useState<number>(60);
@@ -198,6 +207,58 @@ export const MultiplayerLobby: React.FC<MultiplayerLobbyProps> = ({
 
         {/* Right Column: Room Actions (7 cols) */}
         <div className="md:col-span-7 bg-slate-900/80 backdrop-blur-xl border border-emerald-500/20 rounded-3xl p-5 sm:p-6 shadow-xl flex flex-col">
+          {/* Active Game Reconnect Banner */}
+          {savedSession && savedSession.roomId && (
+            <div className="mb-5 p-4 rounded-2xl bg-gradient-to-r from-amber-950/60 via-emerald-950/60 to-slate-900 border-2 border-amber-500/50 shadow-[0_0_20px_rgba(245,158,11,0.2)] flex flex-col sm:flex-row items-center justify-between gap-3 relative overflow-hidden">
+              <div className="absolute top-0 right-0 w-32 h-32 bg-amber-500/10 rounded-full blur-2xl pointer-events-none" />
+              <div className="flex items-center gap-3 w-full sm:w-auto">
+                <div className="w-10 h-10 rounded-xl bg-amber-500/20 border border-amber-500/40 flex items-center justify-center shrink-0">
+                  <RefreshCw className="w-5 h-5 text-amber-400" />
+                </div>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <span className="px-2 py-0.5 rounded-md bg-amber-400 text-slate-950 text-[10px] font-black tracking-wider uppercase">
+                      진행 중 게임 발견
+                    </span>
+                    <span className="text-xs font-mono font-bold text-emerald-300">
+                      방 코드: {savedSession.roomId}
+                    </span>
+                  </div>
+                  <p className="text-xs text-slate-300 mt-0.5">
+                    <strong className="text-amber-300">[{savedSession.playerName}]</strong> 님의 게임 세션이 유지되고 있습니다.
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2 w-full sm:w-auto justify-end">
+                {onReconnectSession && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      soundManager.playDiceRoll(200);
+                      onReconnectSession(savedSession);
+                    }}
+                    disabled={isLoading}
+                    className="flex-1 sm:flex-none px-4 py-2.5 rounded-xl bg-gradient-to-r from-amber-400 to-emerald-400 hover:from-amber-300 hover:to-emerald-300 text-slate-950 font-black text-xs shadow-md transition-all hover:scale-105 flex items-center justify-center gap-1.5 cursor-pointer"
+                  >
+                    <RefreshCw className="w-3.5 h-3.5" />
+                    <span>{isLoading ? '재접속 중...' : '지금 즉시 재접속'}</span>
+                  </button>
+                )}
+                {onClearSavedSession && (
+                  <button
+                    type="button"
+                    onClick={onClearSavedSession}
+                    title="세션 종료"
+                    className="p-2.5 rounded-xl bg-slate-800/80 hover:bg-rose-950/60 hover:text-rose-400 text-slate-400 border border-slate-700/60 transition-colors cursor-pointer"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
+
           {/* Tabs */}
           <div className="grid grid-cols-2 gap-2 p-1 bg-slate-950/80 rounded-2xl border border-slate-800 mb-5">
             <button
