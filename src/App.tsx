@@ -145,11 +145,15 @@ export default function App() {
   } | null>(null);
   const [gameOverData, setGameOverData] = useState<GameOverResult | null>(null);
   const [showGameOverModal, setShowGameOverModal] = useState<boolean>(false);
+  const [lastDecisionNotice, setLastDecisionNotice] = useState<string | null>(null);
 
   // Concurrency refs
   const turnSeqRef = useRef<number>(1);
   const timersRef = useRef<number[]>([]);
   const broadcastTimeoutRef = useRef<number | null>(null);
+  const lastDecisionNoticeTimeoutRef = useRef<number | null>(null);
+  const boardBroadcastRef = useRef<BoardBroadcastMessage | null>(null);
+  const lastActionBroadcastTimeRef = useRef<number>(0);
 
   const playersRef = useRef<Player[]>(players);
   const cellsRef = useRef<Record<number, CellState>>(cells);
@@ -170,6 +174,21 @@ export default function App() {
   useEffect(() => { currentRoomRef.current = currentRoom; }, [currentRoom]);
   useEffect(() => { isMultiplayerRef.current = isMultiplayer; }, [isMultiplayer]);
   useEffect(() => { myPlayerIndexRef.current = myPlayerIndex; }, [myPlayerIndex]);
+
+  // Decision Notice Helper (Visible in multiplayer top HUD and synchronized)
+  const setDecisionNotice = useCallback((notice: string | null) => {
+    if (lastDecisionNoticeTimeoutRef.current) {
+      window.clearTimeout(lastDecisionNoticeTimeoutRef.current);
+      lastDecisionNoticeTimeoutRef.current = null;
+    }
+    setLastDecisionNotice(notice);
+    if (notice) {
+      lastDecisionNoticeTimeoutRef.current = window.setTimeout(() => {
+        setLastDecisionNotice(null);
+        lastDecisionNoticeTimeoutRef.current = null;
+      }, 5000);
+    }
+  }, []);
 
   // Timers
   const registerTimer = useCallback((fn: () => void, delayMs: number, expectedTurnSeq?: number) => {
@@ -198,24 +217,47 @@ export default function App() {
       window.clearTimeout(broadcastTimeoutRef.current);
       broadcastTimeoutRef.current = null;
     }
+    if (lastDecisionNoticeTimeoutRef.current) {
+      window.clearTimeout(lastDecisionNoticeTimeoutRef.current);
+      lastDecisionNoticeTimeoutRef.current = null;
+    }
     soundManager.stopAll();
   }, []);
 
-  const triggerBroadcast = useCallback((msg: Omit<BoardBroadcastMessage, 'id' | 'timestamp'>) => {
+  const triggerBroadcast = useCallback((msg: Omit<BoardBroadcastMessage, 'id' | 'timestamp'>, emitSync: boolean = true) => {
     if (broadcastTimeoutRef.current) {
       window.clearTimeout(broadcastTimeoutRef.current);
       broadcastTimeoutRef.current = null;
     }
-    setBoardBroadcast({
+    const fullMsg: BoardBroadcastMessage = {
       ...msg,
       id: Math.random().toString(),
       timestamp: Date.now(),
-    });
+    };
+    if (msg.category !== 'turn' && msg.category !== 'roll') {
+      lastActionBroadcastTimeRef.current = Date.now();
+    }
+    setBoardBroadcast(fullMsg);
+    boardBroadcastRef.current = fullMsg;
+
+    if (emitSync && isMultiplayerRef.current && currentRoomRef.current) {
+      const socket = getSocket();
+      socket.emit('board_broadcast', {
+        roomId: currentRoomRef.current.id,
+        msg: fullMsg,
+      });
+    }
 
     broadcastTimeoutRef.current = window.setTimeout(() => {
       setBoardBroadcast(null);
-      broadcastTimeoutRef.current = null;
-    }, 6500);
+      boardBroadcastRef.current = null;
+      if (emitSync && isMultiplayerRef.current && currentRoomRef.current) {
+        const socket = getSocket();
+        socket.emit('board_broadcast_clear', {
+          roomId: currentRoomRef.current.id,
+        });
+      }
+    }, 6000);
   }, []);
 
   useEffect(() => {
@@ -240,18 +282,23 @@ export default function App() {
   };
 
   // Log
-  const addLog = (playerId: number, text: string, type: GameLogEntry['type']) => {
+  const addLog = (playerId: number, text: string, type: GameLogEntry['type'], emitSync: boolean = true) => {
     const timeStr = new Date().toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-    setGameLogs(prev => [
-      ...prev,
-      {
-        id: Math.random().toString(),
-        playerId,
-        text,
-        type,
-        timestamp: timeStr,
-      },
-    ]);
+    const entry: GameLogEntry = {
+      id: Math.random().toString(),
+      playerId,
+      text,
+      type,
+      timestamp: timeStr,
+    };
+    setGameLogs(prev => [...prev, entry]);
+    if (emitSync && isMultiplayerRef.current && currentRoomRef.current) {
+      const socket = getSocket();
+      socket.emit('add_game_log', {
+        roomId: currentRoomRef.current.id,
+        entry,
+      });
+    }
   };
 
   // Recalculate total assets
@@ -281,6 +328,40 @@ export default function App() {
   const broadcastSyncState = (overrides?: Partial<any>) => {
     if (!isMultiplayerRef.current || !currentRoomRef.current) return;
     const socket = getSocket();
+
+    const effectiveActiveModal = (overrides && 'activeModal' in overrides)
+      ? overrides.activeModal
+      : activeModal;
+
+    let defaultObserverDetail = '';
+    if (effectiveActiveModal === 'purchase') {
+      defaultObserverDetail = `${playersRef.current[activePlayerIndexRef.current]?.name}님이 토지/건물 구매를 검토하고 있습니다.`;
+    } else if (effectiveActiveModal === 'toll') {
+      defaultObserverDetail = `${playersRef.current[activePlayerIndexRef.current]?.name}님이 통행료 지불 및 인수 여부를 결정 중입니다.`;
+    } else if (effectiveActiveModal === 'space_travel') {
+      defaultObserverDetail = `${playersRef.current[activePlayerIndexRef.current]?.name}님이 우주여행 목적지를 선택하고 있습니다.`;
+    } else if (effectiveActiveModal === 'golden_key') {
+      defaultObserverDetail = `${playersRef.current[activePlayerIndexRef.current]?.name}님이 황금열쇠 카드를 확인하고 있습니다.`;
+    } else if (effectiveActiveModal === 'island') {
+      defaultObserverDetail = `${playersRef.current[activePlayerIndexRef.current]?.name}님이 무인도 탈출 작전을 선택하고 있습니다.`;
+    } else if (effectiveActiveModal === 'debt') {
+      defaultObserverDetail = `${playersRef.current[activePlayerIndexRef.current]?.name}님이 부채 해결을 진행 중입니다.`;
+    } else if (effectiveActiveModal === 'start_upgrade') {
+      defaultObserverDetail = `${playersRef.current[activePlayerIndexRef.current]?.name}님이 출발점 원격 증축을 검토하고 있습니다.`;
+    }
+
+    const effectiveObserverModal = (overrides && 'activeObserverModal' in overrides)
+      ? overrides.activeObserverModal
+      : effectiveActiveModal;
+
+    const effectiveObserverDetail = (overrides && 'activeObserverDetail' in overrides)
+      ? overrides.activeObserverDetail
+      : (effectiveObserverModal ? defaultObserverDetail : '');
+
+    const effectiveLastDecisionNotice = (overrides && 'lastDecisionNotice' in overrides)
+      ? overrides.lastDecisionNotice
+      : lastDecisionNotice;
+
     const payload = {
       players: playersRef.current,
       cells: cellsRef.current,
@@ -291,19 +372,11 @@ export default function App() {
       lastDice,
       isDouble,
       doubleCount: doubleCountRef.current,
-      activeModal,
-      activeObserverModal: activeModal,
-      activeObserverDetail: activeModal === 'purchase'
-        ? `${playersRef.current[activePlayerIndexRef.current]?.name}님이 토지/건물 구매를 검토하고 있습니다.`
-        : activeModal === 'toll'
-        ? `${playersRef.current[activePlayerIndexRef.current]?.name}님이 통행료 지불 및 인수 여부를 결정 중입니다.`
-        : activeModal === 'space_travel'
-        ? `${playersRef.current[activePlayerIndexRef.current]?.name}님이 우주여행 목적지를 선택하고 있습니다.`
-        : activeModal === 'golden_key'
-        ? `${playersRef.current[activePlayerIndexRef.current]?.name}님이 황금열쇠 카드를 확인하고 있습니다.`
-        : activeModal === 'island'
-        ? `${playersRef.current[activePlayerIndexRef.current]?.name}님이 무인도 탈출 작전을 선택하고 있습니다.`
-        : '',
+      activeModal: effectiveActiveModal,
+      activeObserverModal: effectiveObserverModal,
+      activeObserverDetail: effectiveObserverDetail,
+      lastDecisionNotice: effectiveLastDecisionNotice,
+      boardBroadcast: boardBroadcastRef.current,
       remainingSeconds,
       gameOverData: gameOverDataRef.current,
       ...overrides,
@@ -500,13 +573,22 @@ export default function App() {
         setShowGameOverModal(true);
       }
 
-      // Observer Modal notice
+      // Observer Modal & Decision notice
       if (incomingState.activeObserverModal) {
         setActiveObserverModal(incomingState.activeObserverModal);
         setActiveObserverDetail(incomingState.activeObserverDetail || '');
       } else {
         setActiveObserverModal(null);
         setActiveObserverDetail('');
+      }
+
+      if (incomingState.lastDecisionNotice !== undefined) {
+        setDecisionNotice(incomingState.lastDecisionNotice);
+      }
+
+      if (incomingState.boardBroadcast !== undefined && incomingState.boardBroadcast !== null) {
+        setBoardBroadcast(incomingState.boardBroadcast);
+        boardBroadcastRef.current = incomingState.boardBroadcast;
       }
     }
 
@@ -528,6 +610,27 @@ export default function App() {
       }, 2400);
     }
 
+    function onBoardBroadcast(payload: { msg: Omit<BoardBroadcastMessage, 'id' | 'timestamp'> | BoardBroadcastMessage }) {
+      if (payload?.msg) {
+        triggerBroadcast(payload.msg, false);
+      }
+    }
+
+    function onBoardBroadcastClear() {
+      if (broadcastTimeoutRef.current) {
+        window.clearTimeout(broadcastTimeoutRef.current);
+        broadcastTimeoutRef.current = null;
+      }
+      setBoardBroadcast(null);
+      boardBroadcastRef.current = null;
+    }
+
+    function onAddGameLog(payload: { entry: GameLogEntry }) {
+      if (payload?.entry) {
+        setGameLogs(prev => [...prev, payload.entry]);
+      }
+    }
+
     socket.on('connect', onConnect);
     socket.on('disconnect', onDisconnect);
     socket.on('room_updated', onRoomUpdated);
@@ -538,6 +641,9 @@ export default function App() {
     socket.on('game_state_synced', onGameStateSynced);
     socket.on('chat_message', onChatMessage);
     socket.on('reaction_received', onReactionReceived);
+    socket.on('board_broadcast', onBoardBroadcast);
+    socket.on('board_broadcast_clear', onBoardBroadcastClear);
+    socket.on('add_game_log', onAddGameLog);
 
     if (socket.connected) {
       setSocketConnected(true);
@@ -554,6 +660,9 @@ export default function App() {
       socket.off('game_state_synced', onGameStateSynced);
       socket.off('chat_message', onChatMessage);
       socket.off('reaction_received', onReactionReceived);
+      socket.off('board_broadcast', onBoardBroadcast);
+      socket.off('board_broadcast_clear', onBoardBroadcastClear);
+      socket.off('add_game_log', onAddGameLog);
     };
   }, [appScreen, registerTimer]);
 
@@ -629,36 +738,44 @@ export default function App() {
 
     const nextPlayer = playersRef.current[nextIdx];
     if (nextPlayer) {
-      if (nextPlayer.spaceTravelQueued) {
-        triggerBroadcast({
-          category: 'space_travel',
-          playerId: nextPlayer.id,
-          playerName: nextPlayer.name,
-          playerColor: nextPlayer.color,
-          isAI: nextPlayer.isAI,
-          title: `🛸 [${nextPlayer.name}] 우주여행 차례입니다!`,
-          detail: nextPlayer.isAI
-            ? '컴퓨터 AI가 우주여행 목적지를 연산 중입니다...'
-            : '🚀 [우주여행 하기] 버튼을 눌러 원하는 목적지로 워프하세요!',
-          badge: '우주여행 턴',
-          badgeColor: 'purple',
-        });
-      } else {
-        triggerBroadcast({
-          category: 'turn',
-          playerId: nextPlayer.id,
-          playerName: nextPlayer.name,
-          playerColor: nextPlayer.color,
-          isAI: nextPlayer.isAI,
-          title: `🏁 [${nextPlayer.name}] 님의 차례입니다`,
-          detail: nextPlayer.isAI
-            ? '컴퓨터 AI가 주사위 굴림 및 부동산 전략을 연산 중입니다...'
-            : nextPlayer.islandTurnsLeft > 0
-            ? '🏝️ 무인도 조난 탈출 작전 선택이 필요합니다.'
-            : '🎲 주사위 굴리기 버튼을 눌러 이동하세요!',
-          badge: nextPlayer.isAI ? 'AI 턴' : nextPlayer.islandTurnsLeft > 0 ? '무인도 조난' : '플레이어 턴',
-          badgeColor: nextPlayer.isAI ? 'purple' : nextPlayer.islandTurnsLeft > 0 ? 'indigo' : 'emerald',
-        });
+      const now = Date.now();
+      const hasRecentActionBroadcast = boardBroadcastRef.current &&
+        boardBroadcastRef.current.category !== 'turn' &&
+        boardBroadcastRef.current.category !== 'roll' &&
+        (now - (lastActionBroadcastTimeRef.current || 0) < 4500);
+
+      if (!hasRecentActionBroadcast) {
+        if (nextPlayer.spaceTravelQueued) {
+          triggerBroadcast({
+            category: 'space_travel',
+            playerId: nextPlayer.id,
+            playerName: nextPlayer.name,
+            playerColor: nextPlayer.color,
+            isAI: nextPlayer.isAI,
+            title: `🛸 [${nextPlayer.name}] 우주여행 차례입니다!`,
+            detail: nextPlayer.isAI
+              ? '컴퓨터 AI가 우주여행 목적지를 연산 중입니다...'
+              : '🚀 [우주여행 하기] 버튼을 눌러 원하는 목적지로 워프하세요!',
+            badge: '우주여행 턴',
+            badgeColor: 'purple',
+          });
+        } else {
+          triggerBroadcast({
+            category: 'turn',
+            playerId: nextPlayer.id,
+            playerName: nextPlayer.name,
+            playerColor: nextPlayer.color,
+            isAI: nextPlayer.isAI,
+            title: `🏁 [${nextPlayer.name}] 님의 차례입니다`,
+            detail: nextPlayer.isAI
+              ? '컴퓨터 AI가 주사위 굴림 및 부동산 전략을 연산 중입니다...'
+              : nextPlayer.islandTurnsLeft > 0
+              ? '🏝️ 무인도 조난 탈출 작전 선택이 필요합니다.'
+              : '🎲 주사위 굴리기 버튼을 눌러 이동하세요!',
+            badge: nextPlayer.isAI ? 'AI 턴' : nextPlayer.islandTurnsLeft > 0 ? '무인도 조난' : '플레이어 턴',
+            badgeColor: nextPlayer.isAI ? 'purple' : nextPlayer.islandTurnsLeft > 0 ? 'indigo' : 'emerald',
+          });
+        }
       }
 
       if (!nextPlayer.isAI && nextPlayer.islandTurnsLeft > 0) {
@@ -1234,6 +1351,7 @@ export default function App() {
       return updateTotalAssets(next, cellsRef.current);
     });
 
+    let decisionNotice = '';
     if (buildings.isLandmark) {
       soundManager.playBuildingBuild(true);
       addLog(activeP.id, `🏰 ${activeP.name}가 [${space.name}]에 최고급 랜드마크를 완성했습니다!`, 'upgrade');
@@ -1248,6 +1366,7 @@ export default function App() {
         badge: '랜드마크 완공',
         badgeColor: 'amber',
       });
+      decisionNotice = `🏰 [${activeP.name}] 님이 [${space.name}]에 랜드마크를 완공했습니다! (통행료: ${nextToll}만 원)`;
     } else if (isFirstBuy) {
       addLog(activeP.id, `🏢 ${activeP.name}가 [${space.name}] 토지를 매입했습니다. (비용: ${cost}만 원)`, 'buy');
       triggerBroadcast({
@@ -1261,6 +1380,7 @@ export default function App() {
         badge: '부동산 매입',
         badgeColor: 'emerald',
       });
+      decisionNotice = `🏢 [${activeP.name}] 님이 [${space.name}] 토지를 매입했습니다! (-${cost}만 원)`;
     } else {
       addLog(activeP.id, `🏗️ ${activeP.name}가 [${space.name}] 건물을 증축했습니다. (비용: ${cost}만 원)`, 'buy');
       triggerBroadcast({
@@ -1274,11 +1394,13 @@ export default function App() {
         badge: '건물 증축',
         badgeColor: 'teal',
       });
+      decisionNotice = `🏗️ [${activeP.name}] 님이 [${space.name}] 건물을 증축했습니다! (-${cost}만 원)`;
     }
 
     setActiveModal(null);
-    broadcastSyncState({ activeModal: null });
-    registerTimer(() => endTurn(isDouble, currentSeq), speedConfig.modalActionDelayMs, currentSeq);
+    setDecisionNotice(decisionNotice);
+    broadcastSyncState({ activeModal: null, activeObserverModal: null, activeObserverDetail: '', lastDecisionNotice: decisionNotice });
+    registerTimer(() => endTurn(isDouble, currentSeq), Math.max(3000, speedConfig.modalActionDelayMs), currentSeq);
   };
 
   // Pay Toll
@@ -1304,9 +1426,11 @@ export default function App() {
             playersRef.current = next;
             return updateTotalAssets(next, cellsRef.current);
           });
+          const tollNotice = `💸 [${updatedPayer.name}] 님이 [${space.name}] 통행료를 정산하고 위기를 모면했습니다.`;
+          setDecisionNotice(tollNotice);
           setActiveModal(null);
-          broadcastSyncState({ activeModal: null });
-          registerTimer(() => endTurn(isDouble, currentSeq), speedConfig.modalActionDelayMs, currentSeq);
+          broadcastSyncState({ activeModal: null, activeObserverModal: null, activeObserverDetail: '', lastDecisionNotice: tollNotice });
+          registerTimer(() => endTurn(isDouble, currentSeq), Math.max(3000, speedConfig.modalActionDelayMs), currentSeq);
         },
       });
       setActiveModal('debt');
@@ -1329,6 +1453,7 @@ export default function App() {
       return updateTotalAssets(next, cellsRef.current);
     });
 
+    const tollNotice = `💸 [${payer.name}] 님이 [${space.name}] 통행료 ${toll}만 원을 [${owner.name}]에게 지불했습니다.`;
     addLog(payer.id, `💸 ${payer.name}가 [${space.name}] 통행료 ${toll}만 원을 [${owner.name}]에게 지불했습니다.`, 'toll');
     triggerBroadcast({
       category: 'toll',
@@ -1343,8 +1468,9 @@ export default function App() {
     });
 
     setActiveModal(null);
-    broadcastSyncState({ activeModal: null });
-    registerTimer(() => endTurn(isDouble, currentSeq), speedConfig.modalActionDelayMs, currentSeq);
+    setDecisionNotice(tollNotice);
+    broadcastSyncState({ activeModal: null, activeObserverModal: null, activeObserverDetail: '', lastDecisionNotice: tollNotice });
+    registerTimer(() => endTurn(isDouble, currentSeq), Math.max(3000, speedConfig.modalActionDelayMs), currentSeq);
   };
 
   // Hostile Takeover (인수)
@@ -1394,6 +1520,7 @@ export default function App() {
       return updateTotalAssets(next, cellsRef.current);
     });
 
+    const takeoverNotice = `🔥 [${payer.name}] 님이 [${owner.name}]의 [${space.name}]을 전격 인수했습니다! (-${takeoverCost}만 원)`;
     addLog(payer.id, `🔥 ${payer.name}가 [${owner.name}]의 [${space.name}]을 전격 인수했습니다! (비용: ${takeoverCost}만 원)`, 'buy');
     triggerBroadcast({
       category: 'purchase',
@@ -1408,14 +1535,16 @@ export default function App() {
     });
 
     setActiveModal(null);
-    broadcastSyncState({ activeModal: null });
-    registerTimer(() => endTurn(isDouble, currentSeq), speedConfig.modalActionDelayMs, currentSeq);
+    setDecisionNotice(takeoverNotice);
+    broadcastSyncState({ activeModal: null, activeObserverModal: null, activeObserverDetail: '', lastDecisionNotice: takeoverNotice });
+    registerTimer(() => endTurn(isDouble, currentSeq), Math.max(3000, speedConfig.modalActionDelayMs), currentSeq);
   };
 
   // Free pass card usage
   const handleUseFreePass = (space: SpaceData, owner: Player, payer: Player) => {
     const currentSeq = turnSeqRef.current;
     soundManager.playGoldenKey();
+    const freePassNotice = `🎟️ [${payer.name}] 님이 무료 통과권을 사용하여 [${space.name}] 통행료를 전액 면제받았습니다!`;
     addLog(payer.id, `🎟️ ${payer.name}가 무료 통과권을 사용하여 [${space.name}] 통행료를 전액 면제받았습니다!`, 'event');
     triggerBroadcast({
       category: 'pass',
@@ -1436,8 +1565,9 @@ export default function App() {
     });
 
     setActiveModal(null);
-    broadcastSyncState({ activeModal: null });
-    registerTimer(() => endTurn(isDouble, currentSeq), speedConfig.modalActionDelayMs, currentSeq);
+    setDecisionNotice(freePassNotice);
+    broadcastSyncState({ activeModal: null, activeObserverModal: null, activeObserverDetail: '', lastDecisionNotice: freePassNotice });
+    registerTimer(() => endTurn(isDouble, currentSeq), Math.max(3000, speedConfig.modalActionDelayMs), currentSeq);
   };
 
   // Apply Golden Key Card
@@ -1445,6 +1575,8 @@ export default function App() {
     if (!goldenKeyContext) return;
     const { card, player, currentTurnSeq, rolledDouble } = goldenKeyContext;
     setActiveModal(null);
+
+    let decisionNotice = '';
 
     // Apply card logic
     if (card.type === 'money_gain' && card.amount) {
@@ -1456,7 +1588,19 @@ export default function App() {
         return updateTotalAssets(next, cellsRef.current);
       });
       addLog(player.id, `✨ 황금열쇠 [${card.title}]: +${card.amount}만 원 획득`, 'event');
-      registerTimer(() => endTurn(rolledDouble, currentTurnSeq), speedConfig.modalActionDelayMs, currentTurnSeq);
+      triggerBroadcast({
+        category: 'golden_key',
+        playerId: player.id,
+        playerName: player.name,
+        playerColor: player.color,
+        isAI: player.isAI,
+        title: `✨ 황금열쇠 [${card.title}] 당첨! (+${card.amount}만 원)`,
+        detail: `${player.name}님이 행운의 지원금 +${card.amount}만 원을 수령했습니다!`,
+        badge: '황금열쇠 상금',
+        badgeColor: 'amber',
+      });
+      decisionNotice = `✨ [${player.name}] 님이 황금열쇠 [${card.title}] 당첨으로 +${card.amount}만 원을 획득했습니다!`;
+      registerTimer(() => endTurn(rolledDouble, currentTurnSeq), Math.max(3000, speedConfig.modalActionDelayMs), currentTurnSeq);
     } else if (card.type === 'money_loss' && card.amount) {
       soundManager.playTollPenalty();
       showFloatingEffect(player.id, card.amount, false);
@@ -1467,7 +1611,19 @@ export default function App() {
         return updateTotalAssets(next, cellsRef.current);
       });
       addLog(player.id, `⚠️ 황금열쇠 [${card.title}]: -${card.amount}만 원 지출 (기금 적립)`, 'event');
-      registerTimer(() => endTurn(rolledDouble, currentTurnSeq), speedConfig.modalActionDelayMs, currentTurnSeq);
+      triggerBroadcast({
+        category: 'toll_paid',
+        playerId: player.id,
+        playerName: player.name,
+        playerColor: player.color,
+        isAI: player.isAI,
+        title: `⚠️ 황금열쇠 [${card.title}] (-${card.amount}만 원)`,
+        detail: `${player.name}님이 사회복지기금으로 -${card.amount}만 원을 납부했습니다.`,
+        badge: '황금열쇠 납부',
+        badgeColor: 'rose',
+      });
+      decisionNotice = `⚠️ [${player.name}] 님이 황금열쇠 [${card.title}]로 -${card.amount}만 원을 납부했습니다.`;
+      registerTimer(() => endTurn(rolledDouble, currentTurnSeq), Math.max(3000, speedConfig.modalActionDelayMs), currentTurnSeq);
     } else if (card.type === 'free_pass') {
       soundManager.playGoldenKey();
       setPlayers(prev => {
@@ -1476,7 +1632,19 @@ export default function App() {
         return next;
       });
       addLog(player.id, `🎟️ 황금열쇠 [${card.title}]: 상대 땅 1회 무료 통과권 획득!`, 'event');
-      registerTimer(() => endTurn(rolledDouble, currentTurnSeq), speedConfig.modalActionDelayMs, currentTurnSeq);
+      triggerBroadcast({
+        category: 'golden_key',
+        playerId: player.id,
+        playerName: player.name,
+        playerColor: player.color,
+        isAI: player.isAI,
+        title: `🎟️ 황금열쇠 [${card.title}] 획득!`,
+        detail: `${player.name}님이 상대방 토지 1회 무료 통과권을 획득했습니다!`,
+        badge: '무료 통과권',
+        badgeColor: 'emerald',
+      });
+      decisionNotice = `🎟️ [${player.name}] 님이 황금열쇠 [${card.title}] 무료 통과권을 획득했습니다!`;
+      registerTimer(() => endTurn(rolledDouble, currentTurnSeq), Math.max(3000, speedConfig.modalActionDelayMs), currentTurnSeq);
     } else if (card.type === 'escape_card') {
       soundManager.playGoldenKey();
       setPlayers(prev => {
@@ -1485,19 +1653,35 @@ export default function App() {
         return next;
       });
       addLog(player.id, `🚢 황금열쇠 [${card.title}]: 무인도 탈출선 티켓 획득!`, 'event');
-      registerTimer(() => endTurn(rolledDouble, currentTurnSeq), speedConfig.modalActionDelayMs, currentTurnSeq);
+      triggerBroadcast({
+        category: 'golden_key',
+        playerId: player.id,
+        playerName: player.name,
+        playerColor: player.color,
+        isAI: player.isAI,
+        title: `🚢 황금열쇠 [${card.title}] 획득!`,
+        detail: `${player.name}님이 무인도 탈출선 티켓을 획득했습니다!`,
+        badge: '무인도 탈출선',
+        badgeColor: 'emerald',
+      });
+      decisionNotice = `🚢 [${player.name}] 님이 황금열쇠 [${card.title}] 무인도 탈출선 티켓을 획득했습니다!`;
+      registerTimer(() => endTurn(rolledDouble, currentTurnSeq), Math.max(3000, speedConfig.modalActionDelayMs), currentTurnSeq);
     } else if (card.type === 'move_start') {
       soundManager.playCashGain();
+      decisionNotice = `🚩 [${player.name}] 님이 황금열쇠 카드로 출발점으로 즉시 이동합니다!`;
       warpToDestination(0);
     } else if (card.type === 'move_island') {
+      decisionNotice = `🏝️ [${player.name}] 님이 황금열쇠 카드로 무인도로 강제 이동되었습니다!`;
       warpToDestination(8);
     } else if (card.type === 'move_space') {
+      decisionNotice = `🛸 [${player.name}] 님이 황금열쇠 카드로 우주정거장으로 이동합니다!`;
       warpToDestination(24);
     } else {
-      registerTimer(() => endTurn(rolledDouble, currentTurnSeq), speedConfig.modalActionDelayMs, currentTurnSeq);
+      registerTimer(() => endTurn(rolledDouble, currentTurnSeq), Math.max(3000, speedConfig.modalActionDelayMs), currentTurnSeq);
     }
 
-    broadcastSyncState({ activeModal: null });
+    setDecisionNotice(decisionNotice);
+    broadcastSyncState({ activeModal: null, activeObserverModal: null, activeObserverDetail: '', lastDecisionNotice: decisionNotice });
   };
 
   // Warp to Destination (Space Travel or Golden Key teleport)
@@ -1546,7 +1730,19 @@ export default function App() {
   const handleUseIslandEscapeCard = (player: Player) => {
     const currentSeq = turnSeqRef.current;
     soundManager.playGoldenKey();
+    const decisionNotice = `🚢 [${player.name}] 님이 무인도 탈출 카드를 사용하여 즉시 탈출했습니다!`;
     addLog(player.id, `🚢 ${player.name}가 무인도 탈출 카드를 사용하여 즉시 탈출했습니다!`, 'event');
+    triggerBroadcast({
+      category: 'island',
+      playerId: player.id,
+      playerName: player.name,
+      playerColor: player.color,
+      isAI: player.isAI,
+      title: `🚢 [무인도 탈출] 탈출권 사용!`,
+      detail: `${player.name}님이 탈출선 티켓으로 즉시 무인도를 빠져나왔습니다.`,
+      badge: '무인도 탈출',
+      badgeColor: 'sky',
+    });
     setPlayers(prev => {
       const next = prev.map(p => p.id === player.id ? {
         ...p,
@@ -1557,8 +1753,9 @@ export default function App() {
       return next;
     });
     setActiveModal(null);
-    broadcastSyncState({ activeModal: null });
-    registerTimer(() => endTurn(false, currentSeq), speedConfig.modalActionDelayMs, currentSeq);
+    setDecisionNotice(decisionNotice);
+    broadcastSyncState({ activeModal: null, activeObserverModal: null, activeObserverDetail: '', lastDecisionNotice: decisionNotice });
+    registerTimer(() => endTurn(false, currentSeq), Math.max(3000, speedConfig.modalActionDelayMs), currentSeq);
   };
 
   const handlePayIslandBail = (player: Player) => {
@@ -1580,10 +1777,23 @@ export default function App() {
       playersRef.current = next;
       return updateTotalAssets(next, cellsRef.current);
     });
+    const decisionNotice = `🚤 [${player.name}] 님이 보석금 ${fee}만 원을 납부하고 무인도를 탈출했습니다.`;
     addLog(player.id, `🚤 ${player.name}가 보석금 ${fee}만 원을 납부하고 무인도를 탈출했습니다.`, 'event');
+    triggerBroadcast({
+      category: 'island',
+      playerId: player.id,
+      playerName: player.name,
+      playerColor: player.color,
+      isAI: player.isAI,
+      title: `🚤 [무인도 탈출] 보석금 납부 (-${fee}만 원)`,
+      detail: `${player.name}님이 보석금을 납부하고 무인도를 즉시 탈출했습니다.`,
+      badge: '보석금 탈출',
+      badgeColor: 'sky',
+    });
     setActiveModal(null);
-    broadcastSyncState({ activeModal: null });
-    registerTimer(() => endTurn(false, currentSeq), speedConfig.modalActionDelayMs, currentSeq);
+    setDecisionNotice(decisionNotice);
+    broadcastSyncState({ activeModal: null, activeObserverModal: null, activeObserverDetail: '', lastDecisionNotice: decisionNotice });
+    registerTimer(() => endTurn(false, currentSeq), Math.max(3000, speedConfig.modalActionDelayMs), currentSeq);
   };
 
   const handleTryIslandDouble = () => {
@@ -1601,25 +1811,52 @@ export default function App() {
 
     if (d1 === d2) {
       soundManager.playDoubleBonus();
+      const decisionNotice = `🎯 [${activeP.name}] 님이 [${d1}, ${d2}] 더블로 무인도를 극적 탈출했습니다!`;
       addLog(activeP.id, `🎯 무인도 주사위 [${d1}, ${d2}] 더블 성공! 즉시 탈출합니다!`, 'event');
+      triggerBroadcast({
+        category: 'island',
+        playerId: activeP.id,
+        playerName: activeP.name,
+        playerColor: activeP.color,
+        isAI: activeP.isAI,
+        title: `🎯 [무인도 탈출] 더블 [${d1}, ${d2}] 성공!`,
+        detail: `${activeP.name}님이 주사위 더블로 극적으로 탈출했습니다!`,
+        badge: '더블 탈출',
+        badgeColor: 'amber',
+      });
+      setDecisionNotice(decisionNotice);
       setPlayers(prev => {
         const next = prev.map(p => p.id === activeP.id ? { ...p, islandTurnsLeft: 0 } : p);
         playersRef.current = next;
         return next;
       });
-      registerTimer(() => endTurn(true, currentSeq), speedConfig.modalActionDelayMs, currentSeq);
+      broadcastSyncState({ activeModal: null, activeObserverModal: null, activeObserverDetail: '', lastDecisionNotice: decisionNotice });
+      registerTimer(() => endTurn(true, currentSeq), Math.max(3000, speedConfig.modalActionDelayMs), currentSeq);
     } else {
       soundManager.playTollPenalty();
       const remainingTurns = Math.max(0, activeP.islandTurnsLeft - 1);
+      const decisionNotice = `❌ [${activeP.name}] 님이 무인도 탈출 주사위 [${d1}, ${d2}] 실패! (남은 격리: ${remainingTurns}턴)`;
       addLog(activeP.id, `❌ 무인도 탈출 주사위 [${d1}, ${d2}] 실패! (남은 격리: ${remainingTurns}턴)`, 'event');
+      triggerBroadcast({
+        category: 'island',
+        playerId: activeP.id,
+        playerName: activeP.name,
+        playerColor: activeP.color,
+        isAI: activeP.isAI,
+        title: `❌ [무인도 탈출] 더블 [${d1}, ${d2}] 실패`,
+        detail: `${activeP.name}님이 탈출에 실패했습니다. (남은 격리: ${remainingTurns}턴)`,
+        badge: '탈출 실패',
+        badgeColor: 'rose',
+      });
+      setDecisionNotice(decisionNotice);
       setPlayers(prev => {
         const next = prev.map(p => p.id === activeP.id ? { ...p, islandTurnsLeft: remainingTurns } : p);
         playersRef.current = next;
         return next;
       });
-      registerTimer(() => endTurn(false, currentSeq), speedConfig.modalActionDelayMs, currentSeq);
+      broadcastSyncState({ activeModal: null, activeObserverModal: null, activeObserverDetail: '', lastDecisionNotice: decisionNotice });
+      registerTimer(() => endTurn(false, currentSeq), Math.max(3000, speedConfig.modalActionDelayMs), currentSeq);
     }
-    broadcastSyncState({ activeModal: null });
   };
 
   // Debt & Loan confirmation
@@ -1643,7 +1880,20 @@ export default function App() {
       return updateTotalAssets(next, cellsRef.current);
     });
 
+    const loanNotice = `🏦 [${activeP.name}] 님이 긴급 대출 ${loanAmount}만 원을 받았습니다.`;
     addLog(activeP.id, `🏦 ${activeP.name}가 긴급 대출 ${loanAmount}만 원을 받았습니다.`, 'event');
+    triggerBroadcast({
+      category: 'fund',
+      playerId: activeP.id,
+      playerName: activeP.name,
+      playerColor: activeP.color,
+      isAI: activeP.isAI,
+      title: `🏦 [긴급 대출 실행] +${loanAmount}만 원`,
+      detail: `${activeP.name}님이 은행 긴급 대출로 파산 위기를 넘겼습니다.`,
+      badge: '대출 실행',
+      badgeColor: 'amber',
+    });
+    setDecisionNotice(loanNotice);
     debtModalData.onSuccess(updatedPayer, debtModalData.recipient);
   };
 
@@ -1693,13 +1943,39 @@ export default function App() {
       return updateTotalAssets(next, cellsRef.current);
     });
 
+    const sellNotice = `🏛️ [${activeP.name}] 님이 부동산 ${salePlans.length}건을 매각하여 ${totalRefund}만 원을 확보했습니다.`;
     addLog(activeP.id, `🏛️ ${activeP.name}가 부동산 ${salePlans.length}건을 매각하여 ${totalRefund}만 원을 확보했습니다.`, 'event');
+    triggerBroadcast({
+      category: 'purchase',
+      playerId: activeP.id,
+      playerName: activeP.name,
+      playerColor: activeP.color,
+      isAI: activeP.isAI,
+      title: `🏛️ [부동산 매각] +${totalRefund}만 원 확보`,
+      detail: `${activeP.name}님이 부동산을 긴급 처분하여 부채를 변제했습니다.`,
+      badge: '자산 매각',
+      badgeColor: 'slate',
+    });
+    setDecisionNotice(sellNotice);
     debtModalData.onSuccess(updatedPayer, debtModalData.recipient);
   };
 
   const handleVoluntaryBankruptcy = () => {
     if (!debtModalData) return;
     const bankruptP = debtModalData.payer;
+    const bankruptNotice = `💥 [${bankruptP.name}] 님이 최종 파산했습니다!`;
+    triggerBroadcast({
+      category: 'bankrupt',
+      playerId: bankruptP.id,
+      playerName: bankruptP.name,
+      playerColor: bankruptP.color,
+      isAI: bankruptP.isAI,
+      title: `💥 [파산 선언] ${bankruptP.name} 최종 파산!`,
+      detail: `${bankruptP.name}님이 채무를 변제하지 못하고 파산 처리되었습니다.`,
+      badge: '파산 탈락',
+      badgeColor: 'rose',
+    });
+    setDecisionNotice(bankruptNotice);
     setActiveModal(null);
     setDebtModalData(null);
     checkGameOver(playersRef.current.map(p => p.id === bankruptP.id ? { ...p, money: -999 } : p));
@@ -2009,6 +2285,7 @@ export default function App() {
           onSendReaction={handleSendInGameReaction}
           activeObserverModal={activeObserverModal}
           activeObserverDetail={activeObserverDetail}
+          lastDecisionNotice={lastDecisionNotice}
           reactions={floatingReactions}
         />
       )}
@@ -2103,6 +2380,7 @@ export default function App() {
               onConfirmPurchase={(buildings, cost) => confirmPurchase(buildings, cost)}
               onSkip={() => {
                 const currentSeq = turnSeqRef.current;
+                const skipNotice = `⏭️ [${activePlayer.name}] 님이 [${activeSpace.name}] 투자를 보류(패스)했습니다.`;
                 addLog(activePlayer.id, `▶ ${activePlayer.name}가 [${activeSpace.name}] 투자를 보류했습니다.`, 'buy');
                 triggerBroadcast({
                   category: 'pass',
@@ -2116,8 +2394,9 @@ export default function App() {
                   badgeColor: 'slate',
                 });
                 setActiveModal(null);
-                broadcastSyncState({ activeModal: null });
-                registerTimer(() => endTurn(isDouble, currentSeq), speedConfig.modalActionDelayMs, currentSeq);
+                setDecisionNotice(skipNotice);
+                broadcastSyncState({ activeModal: null, activeObserverModal: null, activeObserverDetail: '', lastDecisionNotice: skipNotice });
+                registerTimer(() => endTurn(isDouble, currentSeq), Math.max(3000, speedConfig.modalActionDelayMs), currentSeq);
               }}
             />
           )}
@@ -2168,10 +2447,23 @@ export default function App() {
               onConfirmUpgrade={(spaceId, newBuildings, cost) => handleConfirmStartUpgrade(spaceId, newBuildings, cost)}
               onSkip={() => {
                 const currentSeq = turnSeqRef.current;
+                const skipNotice = `🏁 [${activePlayer.name}] 님이 출발점 원격 증축 기회를 건너뛰었습니다.`;
                 addLog(activePlayer.id, `🏁 ${activePlayer.name}가 출발점 원격 증축 기회를 건너뛰었습니다.`, 'event');
+                triggerBroadcast({
+                  category: 'pass',
+                  playerId: activePlayer.id,
+                  playerName: activePlayer.name,
+                  playerColor: activePlayer.color,
+                  isAI: activePlayer.isAI,
+                  title: `⏭️ [출발점] 원격 증축 건너뛰기`,
+                  detail: `${activePlayer.name}님이 이번 원격 증축 기회를 건너뛰었습니다.`,
+                  badge: '증축 보류',
+                  badgeColor: 'slate',
+                });
                 setActiveModal(null);
-                broadcastSyncState({ activeModal: null });
-                registerTimer(() => endTurn(isDouble, currentSeq), speedConfig.modalActionDelayMs, currentSeq);
+                setDecisionNotice(skipNotice);
+                broadcastSyncState({ activeModal: null, activeObserverModal: null, activeObserverDetail: '', lastDecisionNotice: skipNotice });
+                registerTimer(() => endTurn(isDouble, currentSeq), Math.max(3000, speedConfig.modalActionDelayMs), currentSeq);
               }}
             />
           )}

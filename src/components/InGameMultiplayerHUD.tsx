@@ -31,6 +31,7 @@ interface InGameMultiplayerHUDProps {
   onSendReaction: (emoji: string) => void;
   activeObserverModal: string | null;
   activeObserverDetail?: string;
+  lastDecisionNotice?: string | null;
   reactions: FloatingReaction[];
 }
 
@@ -45,6 +46,7 @@ export const InGameMultiplayerHUD: React.FC<InGameMultiplayerHUDProps> = ({
   onSendReaction,
   activeObserverModal,
   activeObserverDetail,
+  lastDecisionNotice,
   reactions,
 }) => {
   const [chatOpen, setChatOpen] = useState<boolean>(false);
@@ -129,15 +131,25 @@ export const InGameMultiplayerHUD: React.FC<InGameMultiplayerHUDProps> = ({
         </div>
       </div>
 
-      {/* Live Observer Status for Opponent Turn when opponent is in a modal */}
-      {!isMyTurn && activeObserverModal && (
-        <div className="fixed top-14 left-1/2 -translate-x-1/2 z-30 max-w-sm w-[90%] bg-slate-900/95 backdrop-blur-md border border-amber-400/60 rounded-2xl p-2.5 sm:p-3 shadow-2xl animate-fade-in text-center">
-          <div className="flex items-center justify-center gap-2 text-xs text-amber-300 font-bold mb-1">
-            <span className="w-2 h-2 rounded-full bg-amber-400 animate-ping" />
-            <span>상대방이 결정을 진행 중입니다</span>
+      {/* Live Observer Status for Opponent Turn when opponent is in a modal or just completed decision */}
+      {!isMyTurn && (activeObserverModal || lastDecisionNotice) && (
+        <div className={`fixed top-14 left-1/2 -translate-x-1/2 z-30 max-w-sm w-[90%] bg-slate-900/95 backdrop-blur-md border rounded-2xl p-2.5 sm:p-3 shadow-2xl animate-fade-in text-center transition-all ${
+          activeObserverModal
+            ? 'border-amber-400/60'
+            : 'border-emerald-400/80 shadow-[0_0_20px_rgba(16,185,129,0.35)]'
+        }`}>
+          <div className={`flex items-center justify-center gap-2 text-xs font-bold mb-1 ${
+            activeObserverModal ? 'text-amber-300' : 'text-emerald-300'
+          }`}>
+            <span className={`w-2 h-2 rounded-full ${
+              activeObserverModal ? 'bg-amber-400 animate-ping' : 'bg-emerald-400'
+            }`} />
+            <span>{activeObserverModal ? '상대방이 결정을 진행 중입니다' : '상대방 결정 완료!'}</span>
           </div>
-          <p className="text-[11px] text-slate-300 leading-snug">
-            {activeObserverDetail || `[${opponent?.name}] 님이 모달 창에서 선택하고 있습니다...`}
+          <p className="text-[11px] text-slate-200 leading-snug font-medium">
+            {activeObserverModal
+              ? (activeObserverDetail || `[${opponent?.name}] 님이 모달 창에서 선택하고 있습니다...`)
+              : lastDecisionNotice}
           </p>
         </div>
       )}

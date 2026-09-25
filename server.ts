@@ -373,6 +373,32 @@ async function startServer() {
       socket.to(roomId).emit('game_state_synced', payload.gameState);
     });
 
+    socket.on('board_broadcast', (payload: { roomId: string; msg: any }) => {
+      if (!payload.roomId) return;
+      const roomId = payload.roomId.toUpperCase();
+      const room = rooms.get(roomId);
+      if (room && room.gameState) {
+        room.gameState.boardBroadcast = payload.msg;
+      }
+      socket.to(roomId).emit('board_broadcast', payload);
+    });
+
+    socket.on('board_broadcast_clear', (payload: { roomId: string }) => {
+      if (!payload.roomId) return;
+      const roomId = payload.roomId.toUpperCase();
+      const room = rooms.get(roomId);
+      if (room && room.gameState) {
+        room.gameState.boardBroadcast = null;
+      }
+      socket.to(roomId).emit('board_broadcast_clear');
+    });
+
+    socket.on('add_game_log', (payload: { roomId: string; entry: any }) => {
+      if (!payload.roomId || !payload.entry) return;
+      const roomId = payload.roomId.toUpperCase();
+      socket.to(roomId).emit('add_game_log', payload);
+    });
+
     // In-room Chat Message
     socket.on('send_chat', (payload: {
       roomId: string;
